@@ -50,7 +50,7 @@ void printAction(int, int, enum actionType);
 void printCache();
 void fill_block(int, int, int);
 void replace_block(int, int, int);
-void write_back(int);
+void write_back(int, int);
 
 /*
  * Set up the cache with given command line parameters. This is 
@@ -166,17 +166,19 @@ int cache_access(int addr, int write_flag, int write_data)
         }
     }
     // For sw
-    else if (write_flag == 1)
+    else
     {
-        for (int i = 0; i < MAX_CACHE_SIZE; i++){
-            if (cache.blocks[i].set ==set_index && cache.blocks[i].valid){
+        for (int i = 0; i < MAX_CACHE_SIZE; i++)
+        {
+            if (cache.blocks[i].set == set_index && cache.blocks[i].valid)
+            {
                 cache.blocks[i].lruLabel++;
                 cache.blocks[i].data[block_offset] = write_data;
-                return;
+                return mem_access(addr, write_flag, write_data);
             }
         }
 
-         // If not found in cache, access main memory and read a block of data
+        // If not found in cache, access main memory and read a block of data into the cache
         int begin = addr & 0xFFFC;
 
         int no_empty_block = 1;
@@ -187,6 +189,7 @@ int cache_access(int addr, int write_flag, int write_data)
                 // Fill the block
                 no_empty_block = 0;
                 fill_block(i, begin, tag);
+                cache.blocks[i].data[block_offset] = write_data;
             }
         }
 
@@ -202,10 +205,9 @@ int cache_access(int addr, int write_flag, int write_data)
                     replace_target = i;
                 }
             }
+
             replace_block(replace_target, begin, tag);
         }
-        
-
     }
 
     return mem_access(addr, write_flag, write_data);
@@ -232,10 +234,20 @@ void replace_block(int target, int addr, int tag)
 
     if (cache.blocks[target].dirty)
     {
-        write_back(target);
+        write_back(target, addr);
     }
 
-    void fill_block(target, addr, tag);
+    fill_block(target, addr, tag);
+}
+
+void write_back(int target, int addr)
+{
+    int begin = addr;
+
+    for (int i = 0; i < cache.blockSize; i++)
+    {
+        mem_access(begin++, 1, cache.blocks[target].data[i]);
+    }
 }
 
 /*
