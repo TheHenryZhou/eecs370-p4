@@ -33,13 +33,20 @@ typedef struct blockStruct
 
 typedef struct cacheStruct
 {
-    blockStruct blocks[MAX_CACHE_SIZE];
+    blockStruct blocks[MAX_CACHE_SIZE][MAX_BLOCK_SIZE];
     int blockSize;
     int numSets;
     int blocksPerSet;
     int tag_bits_length;
     int set_bits_length;
     int block_offset_bits_length;
+
+    int num_instructions;
+    int num_words_accessed;
+    int num_dirty_left;
+    int hits;
+    int misses;
+    int writebacks;
 
 } cacheStruct;
 
@@ -48,9 +55,9 @@ cacheStruct cache;
 
 void printAction(int, int, enum actionType);
 void printCache();
-void fill_block(int, int, int);
-void replace_block(int, int, int);
-void write_back(int, int);
+void fill_block(int, int, int, int);
+void replace_block(int, int, int, int);
+void write_back(int, int, int);
 
 /*
  * Set up the cache with given command line parameters. This is 
@@ -66,21 +73,21 @@ void cache_init(int blockSize, int numSets, int blocksPerSet)
     cache.set_bits_length = log(numSets) / log(2);
     cache.tag_bits_length = 16 - cache.block_offset_bits_length - cache.set_bits_length;
 
-    int set = 0, count = 0;
+    cache.hits = 0;
+    cache.misses = 0;
+    cache.writebacks = 0;
+    cache.num_instructions = 0;
+    cache.num_words_accessed = 0;
+    cache.num_dirty_left = 0;
 
-    for (int i = 0; i < MAX_CACHE_SIZE; i++)
+    for (int s = 0; s < MAX_CACHE_SIZE; s++)
     {
-        cache.blocks[i].dirty = 0;
-        cache.blocks[i].valid = 0;
-        cache.blocks[i].lruLabel = 0;
-
-        if (count == cache.blocksPerSet)
+        for (int b = 0; b < MAX_CACHE_SIZE; b++)
         {
-            count = 0;
-            set++;
+            cache.blocks[s][b].dirty = 0;
+            cache.blocks[s][b].valid = 0;
+            cache.blocks[s][b].lruLabel = 0;
         }
-        cache.blocks[i].set = set;
-        count++;
     }
 
     return;
@@ -99,7 +106,7 @@ void cache_init(int blockSize, int numSets, int blocksPerSet)
 int cache_access(int addr, int write_flag, int write_data)
 {
 
-    printCache();
+    //printCache();
 
     int block_offset_bits_mask = 0xFFFF;
     int set_bits_mask = 0xFFFF;
@@ -122,17 +129,16 @@ int cache_access(int addr, int write_flag, int write_data)
     int set_index = addr & set_bits_mask;
     int tag = addr & tag_bits_mask;
 
-    printf("%d, %d, %d\n", tag, set_index, block_offset);
-
     // For fetch/lw
     if (write_flag == 0)
     {
-        for (int i = 0; i < MAX_CACHE_SIZE; i++)
+        for (int b = 0; b < cache.blocksPerSet; b++)
         {
-            if (cache.blocks[i].set == set_index && cache.blocks[i].valid && cache.blocks[i].tag == tag)
+            if (cache.blocks[set_index][b].valid && cache.blocks[set_index][b].tag == tag)
             {
-                cache.blocks[i].lruLabel++;
-                return cache.blocks[i].data[block_offset];
+                printAction(addr, 1, cacheToProcessor);
+                cache.blocks[set_index][b].lruLabel++;
+                return cache.blocks[set_index][b].data[block_offset];
             }
         }
 
@@ -140,13 +146,14 @@ int cache_access(int addr, int write_flag, int write_data)
         int begin = addr & 0xFFFC;
 
         int no_empty_block = 1;
-        for (int i = 0; i < MAX_CACHE_SIZE; i++)
+        for (int b = 0; b < cache.blocksPerSet; b++)
         {
-            if (cache.blocks[i].set == set_index && !cache.blocks[i].valid)
+            if (!cache.blocks[set_index][b].valid)
             {
                 // Fill the block
                 no_empty_block = 0;
-                fill_block(i, begin, tag);
+                fill_block(set_index, b, begin, tag);
+                break;
             }
         }
 
@@ -154,26 +161,28 @@ int cache_access(int addr, int write_flag, int write_data)
         if (no_empty_block == 1)
         {
             int replace_target = 0, max_lru = 0;
-            for (int i = 0; i < MAX_CACHE_SIZE; i++)
+            for (int b = 0; b < cache.blocksPerSet; b++)
             {
-                if (cache.blocks[i].set == set_index && cache.blocks[i].lruLabel > max_lru)
+                if (cache.blocks[set_index][b].lruLabel > max_lru)
                 {
-                    max_lru = cache.blocks[i].lruLabel;
-                    replace_target = i;
+
+                    max_lru = cache.blocks[set_index][b].lruLabel;
+                    replace_target = b;
                 }
             }
-            replace_block(replace_target, begin, tag);
+            replace_block(set_index, replace_target, begin, tag);
         }
     }
     // For sw
     else
     {
-        for (int i = 0; i < MAX_CACHE_SIZE; i++)
+        for (int b = 0; b < cache.blocksPerSet; b++)
         {
-            if (cache.blocks[i].set == set_index && cache.blocks[i].valid)
+            if (cache.blocks[set_index][b].valid && cache.blocks[set_index][b].tag == tag)
             {
-                cache.blocks[i].lruLabel++;
-                cache.blocks[i].data[block_offset] = write_data;
+                printAction(b, 1, processorToCache);
+                cache.blocks[set_index][b].lruLabel++;
+                cache.blocks[set_index][b].data[block_offset] = write_data;
                 return mem_access(addr, write_flag, write_data);
             }
         }
@@ -182,14 +191,14 @@ int cache_access(int addr, int write_flag, int write_data)
         int begin = addr & 0xFFFC;
 
         int no_empty_block = 1;
-        for (int i = 0; i < MAX_CACHE_SIZE; i++)
+        for (int b = 0; b < cache.blocksPerSet; b++)
         {
-            if (cache.blocks[i].set == set_index && !cache.blocks[i].valid)
+            if (!cache.blocks[set_index][b].valid)
             {
                 // Fill the block
                 no_empty_block = 0;
-                fill_block(i, begin, tag);
-                cache.blocks[i].data[block_offset] = write_data;
+                fill_block(set_index, b, begin, tag);
+                cache.blocks[set_index][b].data[block_offset] = write_data;
             }
         }
 
@@ -197,56 +206,58 @@ int cache_access(int addr, int write_flag, int write_data)
         if (no_empty_block == 1)
         {
             int replace_target = 0, max_lru = 0;
-            for (int i = 0; i < MAX_CACHE_SIZE; i++)
+            for (int b = 0; b < cache.blocksPerSet; b++)
             {
-                if (cache.blocks[i].set == set_index && cache.blocks[i].lruLabel > max_lru)
+                if (cache.blocks[set_index][b].lruLabel > max_lru)
                 {
-                    max_lru = cache.blocks[i].lruLabel;
-                    replace_target = i;
+                    max_lru = cache.blocks[set_index][b].lruLabel;
+                    replace_target = b;
                 }
             }
 
-            replace_block(replace_target, begin, tag);
+            replace_block(set_index, replace_target, begin, tag);
         }
     }
 
     return mem_access(addr, write_flag, write_data);
 }
 
-void fill_block(int target, int addr, int tag)
+void fill_block(int set_index, int target, int addr, int tag)
 {
-
+    printAction(addr, cache.blockSize, memoryToCache);
     int begin = addr;
 
     for (int i = 0; i < cache.blockSize; i++)
     {
-        cache.blocks[target].data[i] = mem_access(begin++, 0, 0);
+        cache.blocks[set_index][target].data[i] = mem_access(begin++, 0, 0);
     }
 
-    cache.blocks[target].lruLabel = 0;
-    cache.blocks[target].valid = 1;
-    cache.blocks[target].tag = tag;
-    cache.blocks[target].dirty = 0;
+    cache.blocks[set_index][target].lruLabel = 0;
+    cache.blocks[set_index][target].valid = 1;
+    cache.blocks[set_index][target].tag = tag;
+    cache.blocks[set_index][target].dirty = 0;
 }
 
-void replace_block(int target, int addr, int tag)
+void replace_block(int set_index, int target, int addr, int tag)
 {
 
-    if (cache.blocks[target].dirty)
+    if (cache.blocks[set_index][target].dirty)
     {
-        write_back(target, addr);
+        printAction(addr, cache.blockSize, cacheToMemory);
+        write_back(set_index, target, addr);
     }
 
-    fill_block(target, addr, tag);
+    printAction(addr, cache.blockSize, memoryToCache);
+    fill_block(set_index, target, addr, tag);
 }
 
-void write_back(int target, int addr)
+void write_back(int set_index, int target, int addr)
 {
     int begin = addr;
 
     for (int i = 0; i < cache.blockSize; i++)
     {
-        mem_access(begin++, 1, cache.blocks[target].data[i]);
+        mem_access(begin++, 1, cache.blocks[set_index][target].data[i]);
     }
 }
 
@@ -258,7 +269,11 @@ void write_back(int target, int addr)
  */
 void printStats()
 {
-
+    printf("End of run statistics\n");
+    printf(" total of % d instructions executed\n ", cache.num_instructions);
+    printf(" $$$ Main memory words accessed: %d\n", cache.num_words_accessed);
+    printf("hits: %d, misses: %d, writebacks: %d\n", cache.hits, cache.misses, cache.writebacks);
+    printf("%d dirty memory blocks left\n", cache.num_dirty_left);
     return;
 }
 
@@ -311,14 +326,17 @@ void printCache()
     for (int set = 0; set < cache.numSets; ++set)
     {
         printf("\tset %i:\n", set);
-        for (int block = 0; block < cache.blocksPerSet; ++block)
+        for (int s = 0; s < cache.numSets; s++)
         {
-            printf("\t\t[ %i ]: {", block);
-            for (int index = 0; index < cache.blockSize; ++index)
+            for (int block = 0; block < cache.blocksPerSet; ++block)
             {
-                printf(" %i", cache.blocks[set * cache.blocksPerSet + block].data[index]);
+                printf("\t\t[ %i ]: {", block);
+                for (int index = 0; index < cache.blockSize; ++index)
+                {
+                    printf(" %i", cache.blocks[s][block].data[index]);
+                }
+                printf(" }\n");
             }
-            printf(" }\n");
         }
     }
     printf("end cache\n");
